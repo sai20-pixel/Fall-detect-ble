@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fall Sensor BLE Client</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .font-inter {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 min-h-screen flex flex-col items-center p-4 font-inter">
+    <div class="w-full max-w-md bg-white shadow-xl rounded-xl p-6 md:p-8">
+        <h1 class="text-3xl font-bold text-center text-blue-600 mb-6">Fall Detector Client</h1>
+
+        <!-- Status & Connect Button -->
+        <div class="flex flex-col items-center space-y-4">
+            <button id="connectButton"
+                class="w-full py-3 px-6 bg-green-500 text-white font-semibold rounded-lg shadow-md hover:bg-green-600 transition duration-300 disabled:opacity-50">
+                Connect to FallSensor
+            </button>
+
+            <!-- NEW: Notification Permission Button -->
+            <button id="requestNotificationButton"
+                class="w-full py-2 px-6 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 transition duration-300 disabled:opacity-50">
+                Enable Mobile Notifications 🔔
+            </button>
+
+            <div id="statusIndicator" class="text-lg font-medium">
+                Status: <span id="statusText" class="text-red-500">Disconnected</span>
+            </div>
+        </div>
+
+        <!-- Notification Display Area -->
+        <div class="mt-8">
+            <h2 class="text-xl font-semibold text-gray-700 mb-4 border-b pb-2">Latest Notifications</h2>
+
+            <!-- Live Value Display (Update this instantly) -->
+            <div id="liveValueContainer" class="p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm mb-4">
+                Current Value: <span id="liveValue" class="font-mono text-gray-500">Awaiting data...</span>
+            </div>
+
+            <!-- Log Area for historical messages -->
+            <div id="log" class="space-y-2 max-h-48 overflow-y-auto p-2 bg-gray-50 rounded-lg border text-sm">
+                <p class="text-gray-500">System ready. Press Connect to start.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Modal/Message Box for Fall Detection (Kept as fallback/in-app alert) -->
+    <div id="notificationModal"
+        class="fixed inset-0 bg-black bg-opacity-70 hidden flex items-center justify-center p-4 z-50 transition-opacity duration-300">
+        <div
+            class="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full transform transition-transform duration-300 scale-95">
+            <div class="text-center">
+                <p class="text-6xl mb-4 animate-bounce">🚨</p>
+                <h3 class="text-2xl font-bold text-red-600 mb-2">EMERGENCY!</h3>
+                <p id="modalMessage" class="text-lg text-gray-800 font-medium">Fall Detected!</p>
+                <button onclick="closeModal()"
+                    class="mt-6 w-full py-2 bg-red-500 text-white font-semibold rounded-lg hover:bg-red-600 transition duration-300">
+                    Acknowledge
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- BLE UUIDs ---
+        const FALL_SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const FALL_CHAR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+        // --- DOM Elements ---
+        const connectButton = document.getElementById('connectButton');
+        const requestNotificationButton = document.getElementById('requestNotificationButton');
+        const statusText = document.getElementById('statusText');
+        const logDiv = document.getElementById('log');
+        const liveValueSpan = document.getElementById('liveValue');
+        const notificationModal = document.getElementById('notificationModal');
+        const modalMessage = document.getElementById('modalMessage');
+
+        let bleDevice = null;
+        const textDecoder = new TextDecoder('utf-8');
+        let notificationPermission = Notification.permission;
+
+        // --- Helper Functions ---
+
+        function updateStatus(text, color = 'text-red-500') {
+            statusText.textContent = text;
+            statusText.className = color;
+        }
+
+        function logMessage(message, type = 'info') {
+            const p = document.createElement('p');
+            p.className = 'text-xs';
+            let color = 'text-gray-700';
+            if (type === 'error') color = 'text-red-500 font-semibold';
+            if (type === 'success') color = 'text-green-600 font-semibold';
+
+            p.innerHTML = `<span class="${color}">[${new Date().toLocaleTimeString()}]</span> ${message}`;
+
+            // Prepend new message to the top
+            logDiv.prepend(p);
+            if (logDiv.children.length > 20) {
+                logDiv.removeChild(logDiv.lastChild);
+            }
+        }
+
+        function showModal(message) {
+            modalMessage.textContent = message;
+            notificationModal.classList.remove('hidden');
+        }
+
+        window.closeModal = function () {
+            notificationModal.classList.add('hidden');
+        }
+
+        function updateNotificationButtonState() {
+            requestNotificationButton.disabled = notificationPermission === 'granted';
+            if (notificationPermission === 'granted') {
+                requestNotificationButton.textContent = 'Notifications ENABLED ✅';
+                requestNotificationButton.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                requestNotificationButton.classList.add('bg-gray-400');
+            } else if (notificationPermission === 'denied') {
+                requestNotificationButton.textContent = 'Notifications DENIED 🚫';
+            }
+        }
+
+        // --- Notification API Logic ---
+
+        async function requestNotificationPermission() {
+            if (!("Notification" in window)) {
+                logMessage("Browser does not support desktop notifications.", 'error');
+                return;
+            }
+
+            try {
+                notificationPermission = await Notification.requestPermission();
+                updateNotificationButtonState();
+                if (notificationPermission === 'granted') {
+                    logMessage("Notification permission granted!", 'success');
+                } else {
+                    logMessage("Notification permission denied by user.", 'error');
+                }
+            } catch (error) {
+                logMessage(`Error requesting notification permission: ${error.message}`, 'error');
+            }
+        }
+
+        function showSystemNotification(title, body) {
+            if (notificationPermission === 'granted') {
+                new Notification(title, {
+                    body: body,
+                    icon: 'https://placehold.co/64x64/FF0000/FFFFFF?text=🚨', // Red alert icon
+                    vibrate: [200, 100, 200], // Vibrate pattern for mobile alert
+                });
+                logMessage("System notification triggered.", 'info');
+            }
+        }
+
+        // --- BLE Logic ---
+
+        async function connectBLE() {
+            if (!navigator.bluetooth) {
+                logMessage("Web Bluetooth is not supported on this browser/device.", 'error');
+                updateStatus("Error (No BLE)", 'text-yellow-600');
+                return;
+            }
+
+            try {
+                connectButton.disabled = true;
+                connectButton.textContent = 'Scanning...';
+                updateStatus("Scanning...", 'text-yellow-500');
+
+                bleDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'FallSensor' }],
+                    optionalServices: [FALL_SERVICE_UUID]
+                });
+
+                logMessage(`Found device: ${bleDevice.name}`);
+                updateStatus("Connecting...", 'text-yellow-500');
+
+                bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                const server = await bleDevice.gatt.connect();
+                logMessage("Connected to GATT Server.", 'success');
+                updateStatus("Connected", 'text-green-600');
+                connectButton.textContent = 'Disconnect';
+                connectButton.onclick = disconnectBLE;
+
+                const service = await server.getPrimaryService(FALL_SERVICE_UUID);
+                const characteristic = await service.getCharacteristic(FALL_CHAR_UUID);
+
+                await characteristic.startNotifications();
+                characteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+                logMessage("Subscribed to notifications. Ready to receive data.", 'success');
+
+            } catch (error) {
+                logMessage(`Connection failed: ${error.message}`, 'error');
+                updateStatus("Disconnected", 'text-red-500');
+            } finally {
+                if (statusText.textContent === "Disconnected") {
+                    connectButton.disabled = false;
+                    connectButton.textContent = 'Connect to FallSensor';
+                    connectButton.onclick = connectBLE;
+                }
+            }
+        }
+
+        function handleNotifications(event) {
+            const value = event.target.value;
+            const receivedString = textDecoder.decode(value);
+
+            liveValueSpan.textContent = receivedString;
+            logMessage(`Data Received: <strong>${receivedString}</strong>`);
+
+            // If a fall is detected, show the modal AND the system notification
+            if (receivedString.includes("Fall Detected")) {
+                showModal(receivedString);
+                // Trigger the system notification that appears in the bar
+                showSystemNotification("🚨 FALL ALERT 🚨", receivedString);
+            }
+        }
+
+        function onDisconnected(event) {
+            const device = event.target;
+            logMessage(`Device ${device.name} disconnected.`, 'error');
+            updateStatus("Disconnected", 'text-red-500');
+
+            connectButton.disabled = false;
+            connectButton.textContent = 'Connect to FallSensor';
+            connectButton.onclick = connectBLE;
+        }
+
+        function disconnectBLE() {
+            if (bleDevice && bleDevice.gatt.connected) {
+                bleDevice.gatt.disconnect();
+                logMessage("Disconnecting...", 'info');
+            } else {
+                onDisconnected({ target: bleDevice });
+            }
+        }
+
+        // --- Initialization ---
+        connectButton.addEventListener('click', connectBLE);
+        requestNotificationButton.addEventListener('click', requestNotificationPermission);
+
+        // Check current permission state on load
+        updateNotificationButtonState();
+        logMessage("Application Initialized.", 'info');
+
+    </script>
+</body>
+
+</html>
